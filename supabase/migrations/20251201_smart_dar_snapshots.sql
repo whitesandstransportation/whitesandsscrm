@@ -1,0 +1,71 @@
+-- ============================================
+-- SMART DAR METRICS SNAPSHOTS (COMPREHENSIVE)
+-- Store COMPLETE dashboard state when DAR is submitted
+-- Supports historical viewing AND weekly/monthly aggregations
+-- ============================================
+
+-- NOTE: This migration has already been run.
+-- The table smart_dar_snapshots exists in the database.
+-- This file is kept for documentation purposes.
+
+-- Table Structure:
+-- - id UUID PRIMARY KEY
+-- - user_id UUID (references auth.users)
+-- - submission_id UUID (references eod_submissions)
+-- - snapshot_date DATE (unique per user)
+-- 
+-- Core 9 Metrics:
+-- - efficiency_score, completion_rate, priority_completion
+-- - estimation_accuracy, focus_index, task_velocity
+-- - work_rhythm, energy_level, time_utilization
+-- - productivity_momentum, consistency_score
+--
+-- Task Statistics:
+-- - total_tasks, completed_tasks, active_tasks
+-- - paused_tasks, delayed_tasks
+--
+-- Time Statistics:
+-- - total_active_time (seconds), total_paused_time (seconds)
+-- - avg_time_per_task (seconds), total_shift_hours (decimal)
+--
+-- Clock-in/out:
+-- - clocked_in_at, clocked_out_at
+-- - planned_shift_minutes, daily_task_goal
+--
+-- Points & Streaks:
+-- - points_earned, weekday_streak, weekend_bonus_streak
+--
+-- Task Breakdowns (JSONB):
+-- - tasks_by_type, tasks_by_priority, tasks_by_category
+--
+-- Deep Work:
+-- - deep_work_blocks, deep_work_minutes, quick_task_count
+--
+-- Mood/Energy:
+-- - mood_entries_count, energy_entries_count
+-- - avg_mood, avg_energy
+-- - mood_distribution (JSONB), energy_distribution (JSONB)
+--
+-- Insights:
+-- - behavior_insights (JSONB), expert_insight (TEXT)
+--
+-- Goals:
+-- - daily_goal_met (BOOLEAN), shift_plan_met (BOOLEAN)
+--
+-- Timestamps:
+-- - created_at, updated_at
+--
+-- RLS Policies:
+-- - Users can view/insert/update own snapshots
+-- - Admins can view all snapshots
+--
+-- Indexes:
+-- - idx_smart_dar_snapshots_user_date (user_id, snapshot_date DESC)
+-- - idx_smart_dar_snapshots_submission (submission_id)
+-- - idx_smart_dar_snapshots_date_range (snapshot_date, user_id)
+-- - idx_smart_dar_snapshots_points (user_id, points_earned DESC)
+--
+-- Helper Functions:
+-- - get_weekly_summary(user_id, week_start)
+-- - get_monthly_summary(user_id, year, month)
+

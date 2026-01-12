@@ -1,0 +1,864 @@
+import { useState, useEffect, useRef } from 'react';
+import { supabase } from '@/integrations/supabase/client';
+import { useToast } from '@/hooks/use-toast';
+import { Card, CardContent } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { Badge } from '@/components/ui/badge';
+import { Send, MessageSquare, Users, MoreVertical, Archive, Trash2, Image as ImageIcon, X, ArrowLeft } from 'lucide-react';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+
+interface Message {
+  id: string;
+  content: string;
+  sender_id: string;
+  created_at: string;
+  sender?: {
+    id: string;
+    email: string;
+    full_name: string;
+  };
+}
+
+interface Conversation {
+  id: string;
+  other_user: {
+    id: string;
+    email: string;
+    full_name: string;
+  };
+  last_message?: string;
+  last_message_time?: string;
+  unread_count: number;
+}
+
+interface GroupChat {
+  id: string;
+  name: string;
+  description?: string;
+  member_count: number;
+  unread_count: number;
+  last_message?: string;
+  last_message_time?: string;
+}
+
+export function EODMessaging() {
+  const { toast } = useToast();
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [groupChats, setGroupChats] = useState<GroupChat[]>([]);
+  const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
+  const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [newMessage, setNewMessage] = useState('');
+  const [selectedImage, setSelectedImage] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [showMobileSidebar, setShowMobileSidebar] = useState(false);
+
+  useEffect(() => {
+    initializeUser();
+  }, []);
+
+  useEffect(() => {
+    if (currentUser) {
+      loadConversations();
+      loadGroupChats();
+      
+      // Subscribe to new messages
+      const messagesSubscription = supabase
+        .channel('messages')
+        .on('postgres_changes', {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'messages'
+        }, () => {
+          if (selectedConversation) {
+            loadMessages(selectedConversation);
+          }
+          loadConversations();
+        })
+        .subscribe();
+
+      const groupMessagesSubscription = supabase
+        .channel('group_messages')
+        .on('postgres_changes', {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'group_chat_messages'
+        }, () => {
+          if (selectedGroup) {
+            loadGroupMessages(selectedGroup);
+          }
+          loadGroupChats();
+        })
+        .subscribe();
+
+      return () => {
+        messagesSubscription.unsubscribe();
+        groupMessagesSubscription.unsubscribe();
+      };
+    }
+  }, [currentUser, selectedConversation, selectedGroup]);
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  const initializeUser = async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) {
+      setCurrentUser(user);
+    }
+    setLoading(false);
+  };
+
+  const loadConversations = async () => {
+    if (!currentUser) return;
+
+    const { data: convData } = await (supabase as any)
+      .from('conversation_participants')
+      .select('conversation_id')
+      .eq('user_id', currentUser.id);
+
+    if (!convData) return;
+
+    const conversations: Conversation[] = [];
+    
+    for (const conv of convData) {
+      const { data: participants } = await (supabase as any)
+        .from('conversation_participants')
+        .select('user_id')
+        .eq('conversation_id', conv.conversation_id)
+        .neq('user_id', currentUser.id)
+        .single();
+
+      if (participants) {
+        const { data: userProfile } = await supabase
+          .from('user_profiles')
+          .select('user_id, email, first_name, last_name')
+          .eq('user_id', participants.user_id)
+          .single();
+
+        if (userProfile) {
+          const { data: lastMsg } = await (supabase as any)
+            .from('messages')
+            .select('content, created_at')
+            .eq('conversation_id', conv.conversation_id)
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          // Get user's last_read_at for this conversation
+          const { data: participantData } = await (supabase as any)
+            .from('conversation_participants')
+            .select('last_read_at')
+            .eq('conversation_id', conv.conversation_id)
+            .eq('user_id', currentUser.id)
+            .single();
+
+          // Calculate unread count
+          let unreadCount = 0;
+          if (participantData) {
+            const { count } = await (supabase as any)
+              .from('messages')
+              .select('*', { count: 'exact', head: true })
+              .eq('conversation_id', conv.conversation_id)
+              .gt('created_at', participantData.last_read_at || '1970-01-01')
+              .neq('sender_id', currentUser.id);
+            
+            unreadCount = count || 0;
+          }
+
+          conversations.push({
+            id: conv.conversation_id,
+            other_user: {
+              id: userProfile.user_id,
+              email: userProfile.email,
+              full_name: `${userProfile.first_name || ''} ${userProfile.last_name || ''}`.trim() || userProfile.email
+            },
+            last_message: lastMsg?.content,
+            last_message_time: lastMsg?.created_at,
+            unread_count: unreadCount
+          });
+        }
+      }
+    }
+
+    // Sort conversations by last message time (newest first)
+    conversations.sort((a, b) => {
+      const timeA = a.last_message_time ? new Date(a.last_message_time).getTime() : 0;
+      const timeB = b.last_message_time ? new Date(b.last_message_time).getTime() : 0;
+      return timeB - timeA;
+    });
+
+    setConversations(conversations);
+  };
+
+  const loadGroupChats = async () => {
+    if (!currentUser) return;
+
+    const { data: memberData } = await (supabase as any)
+      .from('group_chat_members')
+      .select('group_id')
+      .eq('user_id', currentUser.id);
+
+    if (!memberData || memberData.length === 0) {
+      setGroupChats([]);
+      return;
+    }
+
+    const groupIds = memberData.map((m: any) => m.group_id);
+    const { data: groupsData } = await (supabase as any)
+      .from('group_chats')
+      .select('id, name, description')
+      .in('id', groupIds);
+
+    if (groupsData) {
+      const groupsWithDetails = await Promise.all(groupsData.map(async (group: any) => {
+        const { count } = await (supabase as any)
+          .from('group_chat_members')
+          .select('*', { count: 'exact', head: true })
+          .eq('group_id', group.id);
+
+        const { data: lastMsg } = await (supabase as any)
+          .from('group_chat_messages')
+          .select('content, created_at')
+          .eq('group_id', group.id)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        // Get user's last_read_at for this group
+        const { data: memberData } = await (supabase as any)
+          .from('group_chat_members')
+          .select('last_read_at')
+          .eq('group_id', group.id)
+          .eq('user_id', currentUser.id)
+          .single();
+
+        // Calculate unread count
+        let unreadCount = 0;
+        if (memberData) {
+          const { count: unreadMsgCount } = await (supabase as any)
+            .from('group_chat_messages')
+            .select('*', { count: 'exact', head: true })
+            .eq('group_id', group.id)
+            .gt('created_at', memberData.last_read_at || '1970-01-01')
+            .neq('sender_id', currentUser.id);
+          
+          unreadCount = unreadMsgCount || 0;
+        }
+
+        return {
+          id: group.id,
+          name: group.name,
+          description: group.description,
+          member_count: count || 0,
+          unread_count: unreadCount,
+          last_message: lastMsg?.content || 'No messages yet',
+          last_message_time: lastMsg?.created_at
+        };
+      }));
+
+      // Sort group chats by last message time (newest first)
+      groupsWithDetails.sort((a, b) => {
+        const timeA = a.last_message_time ? new Date(a.last_message_time).getTime() : 0;
+        const timeB = b.last_message_time ? new Date(b.last_message_time).getTime() : 0;
+        return timeB - timeA;
+      });
+
+      setGroupChats(groupsWithDetails);
+    }
+  };
+
+  const loadMessages = async (conversationId: string) => {
+    const { data } = await (supabase as any)
+      .from('messages')
+      .select('*')
+      .eq('conversation_id', conversationId)
+      .order('created_at', { ascending: true });
+
+    if (data) {
+      const messagesWithUsers = await Promise.all(data.map(async (m: any) => {
+        const { data: userProfile } = await supabase
+          .from('user_profiles')
+          .select('user_id, email, first_name, last_name')
+          .eq('user_id', m.sender_id)
+          .single();
+
+        return {
+          ...m,
+          sender: userProfile ? {
+            id: userProfile.user_id,
+            email: userProfile.email,
+            full_name: `${userProfile.first_name || ''} ${userProfile.last_name || ''}`.trim() || userProfile.email
+          } : undefined
+        };
+      }));
+
+      setMessages(messagesWithUsers);
+    }
+
+    // Mark conversation as read
+    await (supabase as any)
+      .from('conversation_participants')
+      .update({ last_read_at: new Date().toISOString() })
+      .eq('conversation_id', conversationId)
+      .eq('user_id', currentUser.id);
+  };
+
+  const loadGroupMessages = async (groupId: string) => {
+    const { data } = await (supabase as any)
+      .from('group_chat_messages')
+      .select('*')
+      .eq('group_id', groupId)
+      .order('created_at', { ascending: true });
+
+    if (data) {
+      const messagesWithUsers = await Promise.all(data.map(async (m: any) => {
+        const { data: userProfile } = await supabase
+          .from('user_profiles')
+          .select('user_id, email, first_name, last_name')
+          .eq('user_id', m.sender_id)
+          .single();
+
+        return {
+          ...m,
+          sender: userProfile ? {
+            id: userProfile.user_id,
+            email: userProfile.email,
+            full_name: `${userProfile.first_name || ''} ${userProfile.last_name || ''}`.trim() || userProfile.email
+          } : undefined
+        };
+      }));
+
+      setMessages(messagesWithUsers);
+    }
+
+    // Mark group chat as read
+    await (supabase as any)
+      .from('group_chat_members')
+      .update({ last_read_at: new Date().toISOString() })
+      .eq('group_id', groupId)
+      .eq('user_id', currentUser.id);
+  };
+
+  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file && file.type.startsWith('image/')) {
+      setSelectedImage(file);
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setImagePreview(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    } else {
+      toast({ title: 'Please select an image file', variant: 'destructive' });
+    }
+  };
+
+  const removeImage = () => {
+    setSelectedImage(null);
+    setImagePreview(null);
+  };
+
+  const uploadImage = async (file: File): Promise<string | null> => {
+    try {
+      const fileExt = file.name.split('.').pop();
+      const fileName = `${currentUser.id}-${Date.now()}.${fileExt}`;
+      const filePath = `message-images/${fileName}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from('message-attachments')
+        .upload(filePath, file);
+
+      if (uploadError) {
+        console.error('Upload error:', uploadError);
+        toast({ title: 'Error uploading image', description: uploadError.message, variant: 'destructive' });
+        return null;
+      }
+
+      const { data: { publicUrl } } = supabase.storage
+        .from('message-attachments')
+        .getPublicUrl(filePath);
+
+      return publicUrl;
+    } catch (error: any) {
+      console.error('Unexpected upload error:', error);
+      toast({ title: 'Error uploading image', description: error.message, variant: 'destructive' });
+      return null;
+    }
+  };
+
+  const sendMessage = async () => {
+    if (!newMessage.trim() && !selectedImage) return;
+
+    const messageContent = newMessage.trim();
+    setNewMessage('');
+
+    // Upload image if selected
+    let imageUrl: string | null = null;
+    if (selectedImage) {
+      imageUrl = await uploadImage(selectedImage);
+      if (!imageUrl) {
+        setNewMessage(messageContent);
+        return;
+      }
+      removeImage();
+    }
+
+    if (selectedConversation) {
+      const { data, error } = await (supabase as any)
+        .from('messages')
+        .insert({
+          conversation_id: selectedConversation,
+          sender_id: currentUser.id,
+          content: messageContent || (imageUrl ? '[Image]' : ''),
+          image_url: imageUrl
+        })
+        .select();
+
+      if (error) {
+        toast({ title: 'Error sending message', description: error.message, variant: 'destructive' });
+        setNewMessage(messageContent);
+        return;
+      }
+
+      if (data && data[0]) {
+        const { data: userProfile } = await supabase
+          .from('user_profiles')
+          .select('user_id, email, first_name, last_name')
+          .eq('user_id', currentUser.id)
+          .single();
+
+        const newMsg = {
+          ...data[0],
+          sender: userProfile ? {
+            id: userProfile.user_id,
+            email: userProfile.email,
+            full_name: `${userProfile.first_name || ''} ${userProfile.last_name || ''}`.trim() || userProfile.email
+          } : undefined
+        };
+
+        setMessages(prev => [...prev, newMsg]);
+      }
+      
+      // Reload conversations to update sorting
+      loadConversations();
+    } else if (selectedGroup) {
+      const { data, error } = await (supabase as any)
+        .from('group_chat_messages')
+        .insert({
+          group_id: selectedGroup,
+          sender_id: currentUser.id,
+          content: messageContent || (imageUrl ? '[Image]' : ''),
+          image_url: imageUrl
+        })
+        .select();
+
+      if (error) {
+        toast({ title: 'Error sending message', description: error.message, variant: 'destructive' });
+        setNewMessage(messageContent);
+        return;
+      }
+
+      if (data && data[0]) {
+        const { data: userProfile } = await supabase
+          .from('user_profiles')
+          .select('user_id, email, first_name, last_name')
+          .eq('user_id', currentUser.id)
+          .single();
+
+        const newMsg = {
+          ...data[0],
+          sender: userProfile ? {
+            id: userProfile.user_id,
+            email: userProfile.email,
+            full_name: `${userProfile.first_name || ''} ${userProfile.last_name || ''}`.trim() || userProfile.email
+          } : undefined
+        };
+
+        setMessages(prev => [...prev, newMsg]);
+      }
+      
+      // Reload group chats to update sorting
+      loadGroupChats();
+    }
+  };
+
+  const archiveConversation = async (conversationId: string) => {
+    try {
+      await (supabase as any)
+        .from('conversations')
+        .update({
+          archived: true,
+          archived_at: new Date().toISOString(),
+          archived_by: currentUser.id
+        })
+        .eq('id', conversationId);
+      
+      toast({ title: 'Conversation archived' });
+      await loadConversations();
+      if (selectedConversation === conversationId) {
+        setSelectedConversation(null);
+        setMessages([]);
+      }
+    } catch (error: any) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' });
+    }
+  };
+
+  const deleteGroupChat = async (groupId: string) => {
+    if (!confirm('Are you sure you want to delete this group chat? This cannot be undone.')) {
+      return;
+    }
+
+    try {
+      await (supabase as any)
+        .from('group_chats')
+        .update({
+          deleted_at: new Date().toISOString(),
+          deleted_by: currentUser.id
+        })
+        .eq('id', groupId);
+      
+      toast({ title: 'Group chat deleted' });
+      await loadGroupChats();
+      if (selectedGroup === groupId) {
+        setSelectedGroup(null);
+        setMessages([]);
+      }
+    } catch (error: any) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' });
+    }
+  };
+
+  if (loading) {
+    return (
+      <Card>
+        <CardContent className="py-8">
+          <div className="text-center text-muted-foreground">Loading messages...</div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <div className="h-full flex overflow-hidden bg-background">
+      {/* Sidebar - All Conversations */}
+      <div className={`
+        w-full md:w-80 border-r flex flex-col bg-card
+        ${(selectedConversation || selectedGroup) ? 'hidden md:flex' : 'flex'}
+      `}>
+        <div className="p-4 border-b">
+          <h3 className="font-medium">All Conversations</h3>
+        </div>
+        
+        <ScrollArea className="flex-1">
+          {conversations.length === 0 && groupChats.length === 0 ? (
+            <div className="p-4 text-center text-muted-foreground">
+              <MessageSquare className="mx-auto h-12 w-12 mb-2 opacity-50" />
+              <p>No conversations yet</p>
+            </div>
+          ) : (
+            <div className="p-2 space-y-2">
+              {/* Direct Chats */}
+              {conversations.map(conv => (
+                <div
+                  key={conv.id}
+                  className={`p-3 md:p-3 rounded-lg hover:bg-accent transition-colors touch-manipulation ${
+                    selectedConversation === conv.id ? 'bg-accent' : ''
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <Avatar
+                      className="cursor-pointer h-10 w-10 md:h-8 md:w-8"
+                      onClick={() => {
+                        setSelectedConversation(conv.id);
+                        setSelectedGroup(null);
+                        loadMessages(conv.id);
+                        setShowMobileSidebar(false);
+                      }}
+                    >
+                      <AvatarFallback>
+                        {conv.other_user.full_name.substring(0, 2).toUpperCase()}
+                      </AvatarFallback>
+                    </Avatar>
+                    <div
+                      className="flex-1 min-w-0 cursor-pointer py-2"
+                      onClick={() => {
+                        setSelectedConversation(conv.id);
+                        setSelectedGroup(null);
+                        loadMessages(conv.id);
+                        setShowMobileSidebar(false);
+                      }}
+                    >
+                      <p className="font-medium truncate">{conv.other_user.full_name}</p>
+                      <p className="text-sm text-muted-foreground truncate">
+                        {conv.last_message || 'No messages yet'}
+                      </p>
+                    </div>
+                    {conv.unread_count > 0 && (
+                      <Badge className="bg-red-500">{conv.unread_count}</Badge>
+                    )}
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="ghost" size="icon" className="h-8 w-8">
+                          <MoreVertical className="h-4 w-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem onClick={() => archiveConversation(conv.id)}>
+                          <Archive className="mr-2 h-4 w-4" />
+                          Archive
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                </div>
+              ))}
+
+              {/* Group Chats */}
+              {groupChats.map(group => (
+                <div
+                  key={group.id}
+                  className={`p-3 md:p-3 rounded-lg transition-colors border-l-4 border-l-blue-500 touch-manipulation ${
+                    selectedGroup === group.id 
+                      ? 'bg-blue-50 dark:bg-blue-950/30' 
+                      : 'bg-blue-50/50 dark:bg-blue-950/10 hover:bg-blue-100 dark:hover:bg-blue-950/20'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <Avatar
+                      className="bg-blue-500 cursor-pointer h-10 w-10 md:h-8 md:w-8"
+                      onClick={() => {
+                        setSelectedGroup(group.id);
+                        setSelectedConversation(null);
+                        loadGroupMessages(group.id);
+                        setShowMobileSidebar(false);
+                      }}
+                    >
+                      <AvatarFallback className="bg-blue-500 text-white">
+                        <Users className="h-4 w-4" />
+                      </AvatarFallback>
+                    </Avatar>
+                    <div
+                      className="flex-1 min-w-0 cursor-pointer py-2"
+                      onClick={() => {
+                        setSelectedGroup(group.id);
+                        setSelectedConversation(null);
+                        loadGroupMessages(group.id);
+                        setShowMobileSidebar(false);
+                      }}
+                    >
+                      <p className="font-medium truncate flex items-center gap-2">
+                        {group.name}
+                        <span className="text-xs bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 px-2 py-0.5 rounded-full">
+                          Group
+                        </span>
+                      </p>
+                      <p className="text-sm text-muted-foreground truncate">
+                        {group.member_count} members
+                      </p>
+                    </div>
+                    {group.unread_count > 0 && (
+                      <Badge className="bg-red-500">{group.unread_count}</Badge>
+                    )}
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="ghost" size="icon" className="h-8 w-8">
+                          <MoreVertical className="h-4 w-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem onClick={() => deleteGroupChat(group.id)} className="text-destructive">
+                          <Trash2 className="mr-2 h-4 w-4" />
+                          Delete Group
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </ScrollArea>
+      </div>
+
+      {/* Chat Area */}
+      <div className={`
+        flex-1 flex flex-col bg-background
+        ${(selectedConversation || selectedGroup) ? 'flex' : 'hidden md:flex'}
+      `}>
+        {selectedConversation || selectedGroup ? (
+          <>
+            {/* Mobile Header with Back Button */}
+            <div className="md:hidden p-3 border-b flex items-center gap-3">
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => {
+                  setSelectedConversation(null);
+                  setSelectedGroup(null);
+                  setShowMobileSidebar(true);
+                }}
+              >
+                <ArrowLeft className="h-5 w-5" />
+              </Button>
+              <div className="flex-1">
+                <h3 className="font-medium">
+                  {selectedConversation 
+                    ? conversations.find(c => c.id === selectedConversation)?.other_user.full_name
+                    : groupChats.find(g => g.id === selectedGroup)?.name
+                  }
+                </h3>
+              </div>
+            </div>
+            
+            {/* Messages */}
+            <ScrollArea className="flex-1 p-3 md:p-4">
+              <div className="space-y-4">
+                {messages.map((msg) => (
+                  <div
+                    key={msg.id}
+                    className={`flex ${msg.sender_id === currentUser?.id ? 'justify-end' : 'justify-start'}`}
+                  >
+                    <div
+                      className={`flex gap-2 max-w-[70%] ${
+                        msg.sender_id === currentUser?.id ? 'flex-row-reverse' : 'flex-row'
+                      }`}
+                    >
+                      <Avatar className="h-8 w-8">
+                        <AvatarFallback>
+                          {msg.sender?.full_name?.[0]?.toUpperCase() || 'U'}
+                        </AvatarFallback>
+                      </Avatar>
+                      <div>
+                        <div
+                          className={`rounded-lg px-4 py-2 ${
+                            msg.sender_id === currentUser?.id
+                              ? 'bg-primary text-primary-foreground'
+                              : 'bg-muted'
+                          }`}
+                        >
+                          <p className="text-sm font-medium mb-1">{msg.sender?.full_name || 'Unknown'}</p>
+                          {(msg as any).image_url && (
+                            <img 
+                              src={(msg as any).image_url} 
+                              alt="Attachment" 
+                              className="max-w-full rounded-lg mb-2 cursor-pointer hover:opacity-90"
+                              onClick={() => window.open((msg as any).image_url, '_blank')}
+                            />
+                          )}
+                          <p className="text-sm">{msg.content}</p>
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          {new Date(msg.created_at).toLocaleString()}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                <div ref={messagesEndRef} />
+              </div>
+            </ScrollArea>
+
+            {/* Input */}
+            <div className="p-3 md:p-4 border-t bg-card">
+              {imagePreview && (
+                <div className="mb-2 relative inline-block">
+                  <img src={imagePreview} alt="Preview" className="max-h-32 rounded-lg" />
+                  <Button
+                    size="icon"
+                    variant="destructive"
+                    className="absolute top-1 right-1 h-6 w-6"
+                    onClick={removeImage}
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
+              )}
+              <div className="flex gap-2">
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={handleImageSelect}
+                  className="hidden"
+                  id="eod-image-upload"
+                />
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="h-10 w-10 md:h-9 md:w-9 touch-manipulation"
+                  onClick={() => document.getElementById('eod-image-upload')?.click()}
+                  title="Attach image"
+                >
+                  <ImageIcon className="h-5 w-5 md:h-4 md:w-4" />
+                </Button>
+                <Input
+                  value={newMessage}
+                  onChange={(e) => setNewMessage(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      sendMessage();
+                    }
+                  }}
+                  onPaste={async (e) => {
+                    const items = e.clipboardData?.items;
+                    if (!items) return;
+                    
+                    for (let i = 0; i < items.length; i++) {
+                      if (items[i].type.indexOf('image') !== -1) {
+                        e.preventDefault();
+                        const file = items[i].getAsFile();
+                        if (file) {
+                          handleImageSelect({ target: { files: [file] } } as any);
+                          toast({ title: 'Image pasted', description: 'Image ready to send' });
+                        }
+                        break;
+                      }
+                    }
+                  }}
+                  placeholder="Type a message... (Ctrl+V to paste images)"
+                  className="flex-1 text-base md:text-sm h-10 md:h-9"
+                />
+                <Button 
+                  onClick={sendMessage} 
+                  disabled={!newMessage.trim() && !selectedImage}
+                  className="h-10 w-10 md:h-9 md:w-9 touch-manipulation"
+                  size="icon"
+                >
+                  <Send className="h-5 w-5 md:h-4 md:w-4" />
+                </Button>
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="flex-1 flex items-center justify-center text-center p-8">
+            <div>
+              <MessageSquare className="mx-auto h-16 w-16 text-muted-foreground mb-4" />
+              <h3 className="text-lg font-medium mb-2">No conversation selected</h3>
+              <p className="text-sm text-muted-foreground">
+                Choose a chat or start a new one
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
