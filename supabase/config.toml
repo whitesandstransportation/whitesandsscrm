@@ -20,3 +20,6 @@ verify_jwt = true
 
 [functions.bulk-import-excel]
 verify_jwt = true
+
+[functions.create-eod-user]
+verify_jwt = false

@@ -292,7 +292,7 @@ export default function Admin() {
         .from('eod_submissions')
         .select(`
           *,
-          eod_submission_tasks!inner(client_name)
+          eod_submission_tasks(client_name)
         `, { count: 'exact' })
         .order('submitted_at', { ascending: false });
 
@@ -505,7 +505,7 @@ export default function Admin() {
         .from('user_feedback')
         .select(`
           *,
-          user_profiles!inner(email, first_name, last_name)
+          user_profiles(email, first_name, last_name)
         `)
         .order('created_at', { ascending: false });
 

@@ -657,9 +657,9 @@ export default function Deals() {
     let stageArray: any[] = [];
     
     // Try to get stages from stage_order first (more reliable)
-    if (pipeline.stage_order && Array.isArray(pipeline.stage_order)) {
+    if (pipeline.stage_order && Array.isArray(pipeline.stage_order) && pipeline.stage_order.length > 0) {
       stageArray = pipeline.stage_order;
-    } 
+    }
     // Fallback to stages array
     else if (pipeline.stages && Array.isArray(pipeline.stages)) {
       stageArray = pipeline.stages;
