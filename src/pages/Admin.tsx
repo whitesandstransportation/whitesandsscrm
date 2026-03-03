@@ -503,27 +503,37 @@ export default function Admin() {
     try {
       const { data, error } = await supabase
         .from('user_feedback')
-        .select(`
-          *,
-          user_profiles(email, first_name, last_name)
-        `)
+        .select('*')
         .order('created_at', { ascending: false });
 
       if (error) throw error;
 
-      const formattedFeedbacks = (data || []).map((fb: any) => ({
-        id: fb.id,
-        user_id: fb.user_id,
-        subject: fb.subject,
-        message: fb.message,
-        images: fb.images || [],
-        status: fb.status,
-        admin_response: fb.admin_response,
-        created_at: fb.created_at,
-        updated_at: fb.updated_at,
-        user_email: fb.user_profiles?.email || 'Unknown',
-        user_name: `${fb.user_profiles?.first_name || ''} ${fb.user_profiles?.last_name || ''}`.trim() || 'Unknown User'
-      }));
+      const userIds = [...new Set((data || []).map((fb: any) => fb.user_id).filter(Boolean))];
+      let profilesMap: Record<string, any> = {};
+      if (userIds.length > 0) {
+        const { data: profiles } = await supabase
+          .from('user_profiles')
+          .select('user_id, email, first_name, last_name')
+          .in('user_id', userIds);
+        (profiles || []).forEach((p: any) => { profilesMap[p.user_id] = p; });
+      }
+
+      const formattedFeedbacks = (data || []).map((fb: any) => {
+        const profile = profilesMap[fb.user_id];
+        return {
+          id: fb.id,
+          user_id: fb.user_id,
+          subject: fb.subject,
+          message: fb.message,
+          images: fb.images || [],
+          status: fb.status,
+          admin_response: fb.admin_response,
+          created_at: fb.created_at,
+          updated_at: fb.updated_at,
+          user_email: profile?.email || 'Unknown',
+          user_name: `${profile?.first_name || ''} ${profile?.last_name || ''}`.trim() || 'Unknown User'
+        };
+      });
 
       setFeedbacks(formattedFeedbacks);
     } catch (e: any) {
